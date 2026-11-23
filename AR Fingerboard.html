@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>AR Fingerboard</title>
+<style>
+  :root{--fg:#fff;--accent:#d6ff00;}
+  @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--fg:#fff;}}
+  *{box-sizing:border-box;margin:0;padding:0;}
+  html,body{height:100%;overflow:hidden;background:#000;
+    font-family:-apple-system,"Segoe UI",Roboto,sans-serif;}
+  #cam{position:fixed;inset:0;width:100%;height:100%;object-fit:cover;}
+  #game{position:fixed;inset:0;width:100%;height:100%;touch-action:none;}
+  #hud{position:fixed;top:0;left:0;right:0;
+    padding:calc(env(safe-area-inset-top,0px) + 14px) 18px 8px;
+    display:flex;justify-content:space-between;align-items:baseline;
+    color:var(--fg);text-shadow:0 1px 6px rgba(0,0,0,.85);pointer-events:none;z-index:5;}
+  #score{font-size:22px;font-weight:800;letter-spacing:.5px;}
+  #best{font-size:13px;font-weight:600;opacity:.8;}
+  #hint{position:fixed;bottom:calc(env(safe-area-inset-bottom,0px) + 28px);left:0;right:0;
+    text-align:center;color:var(--fg);font-size:14px;font-weight:600;
+    text-shadow:0 1px 6px rgba(0,0,0,.85);pointer-events:none;z-index:5;transition:opacity .4s;}
+  #camErr{position:fixed;inset:0;display:none;align-items:center;justify-content:center;
+    color:#fff;background:#0a0a0a;text-align:center;padding:32px;z-index:10;line-height:1.5;}
+  body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);
+    background:rgba(0,0,0,.3);z-index:6;}
+</style>
+</head>
+<body>
+<video id="cam" autoplay playsinline muted></video>
+<canvas id="game"></canvas>
+<div id="hud"><span id="score">0 pts</span><span id="best">mejor: 0</span></div>
+<div id="hint">Apoyá dos dedos en la pantalla para subirte a la tabla</div>
+<div id="camErr">No pude acceder a la cámara.<br>Igual podés jugar, solo que sin el fondo real.</div>
+<script>
+(function(){
+  const video = document.getElementById('cam');
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const scoreEl = document.getElementById('score');
+  const bestEl = document.getElementById('best');
+  const hint = document.getElementById('hint');
+
+  let score = 0, best = 0;
+  try { best = parseInt(localStorage.getItem('fb_best') || '0', 10) || 0; } catch(e) {}
+  bestEl.textContent = 'mejor: ' + best;
+
+  function resize(){ canvas.width = innerWidth; canvas.height = innerHeight; }
+  addEventListener('resize', resize); resize();
+
+  navigator.mediaDevices?.getUserMedia({ video: { facingMode: 'environment' } })
+    .then(s => { video.srcObject = s; })
+    .catch(() => { document.getElementById('camErr').style.display = 'flex'; });
+
+  // --- control: hasta 2 dedos sobre la pantalla ---
+  const touches = {}; // id -> {x,y,vy}
+  function upd(t){
+    const prev = touches[t.identifier];
+    const vy = prev ? t.clientY - prev.y : 0;
+    touches[t.identifier] = { x: t.clientX, y: t.clientY, vy };
+  }
+  canvas.addEventListener('touchstart', e => { e.preventDefault(); [...e.changedTouches].forEach(upd); }, { passive:false });
+  canvas.addEventListener('touchmove',  e => { e.preventDefault(); [...e.changedTouches].forEach(upd); }, { passive:false });
+  canvas.addEventListener('touchend',   e => { [...e.changedTouches].forEach(t => delete touches[t.identifier]); }, { passive:false });
+  const pts = () => Object.values(touches);
+
+  // --- estado de trucos ---
+  let combo = 1, lastTrickAt = 0, floatText = null;
+  const board = { air: 0, spin: 0 };
+
+  function trigger(name, base){
+    const now = performance.now();
+    if (now - lastTrickAt < 280) return;
+    lastTrickAt = now;
+    const gained = Math.round(base * combo);
+    score += gained;
+    combo = Math.min(combo + 0.5, 5);
+    scoreEl.textContent = score + ' pts  x' + combo.toFixed(1);
+    floatText = { text: '+' + gained + ' ' + name, life: 1 };
+    if (score > best){
+      best = score; bestEl.textContent = 'mejor: ' + best;
+      try { localStorage.setItem('fb_best', String(best)); } catch(e) {}
+    }
+    hint.style.opacity = 0;
+    board.air = 1;
+  }
+
+  function detectTrick(){
+    const p = pts();
+    if (p.length < 2) return;
+    const [a, b] = p;
+    const avg = (a.vy + b.vy) / 2;
+    if (avg < -16){
+      const asym = Math.abs(a.vy - b.vy);
+      if (asym > 11){ trigger('KICKFLIP', 150); board.spin = 1; }
+      else trigger('OLLIE', 50);
+    }
+  }
+
+  function roundRect(x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w,y,x+w,y+h,r);
+    ctx.arcTo(x+w,y+h,x,y+h,r);
+    ctx.arcTo(x,y+h,x,y,r);
+    ctx.arcTo(x,y,x+w,y,r);
+    ctx.closePath();
+  }
+
+  function drawBoard(){
+    const p = pts();
+    if (p.length !== 2){ board.air = 0; board.spin = 0; combo = 1; return; }
+    const [a, b] = p;
+    const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    const len = Math.hypot(b.x - a.x, b.y - a.y) * 1.35;
+
+    ctx.save();
+    ctx.translate(mx, my - board.air * 46);
+    ctx.rotate(ang + board.spin * Math.PI * 2);
+    ctx.fillStyle = '#161616';
+    roundRect(-len/2, -14, len, 28, 10); ctx.fill();
+    ctx.fillStyle = 'var(--accent)'.includes('var') ? '#d6ff00' : '#d6ff00';
+    roundRect(-len/2+6, -8, len-12, 16, 6); ctx.fill();
+    ctx.fillStyle = '#9a9a9a';
+    [-len/2+14, len/2-14].forEach(wx => {
+      ctx.beginPath(); ctx.arc(wx, 16, 6, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.arc(wx, -16, 6, 0, 7); ctx.fill();
+    });
+    ctx.restore();
+
+    board.air *= 0.9; board.spin *= 0.85;
+  }
+
+  function drawFloatText(){
+    if (!floatText) return;
+    ctx.save();
+    ctx.globalAlpha = Math.max(floatText.life, 0);
+    ctx.fillStyle = '#d6ff00';
+    ctx.font = '800 30px -apple-system, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(floatText.text, canvas.width/2, canvas.height/2 - 90*(1-floatText.life));
+    ctx.restore();
+    floatText.life -= 0.022;
+    if (floatText.life <= 0) floatText = null;
+  }
+
+  function loop(){
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    detectTrick();
+    drawBoard();
+    drawFloatText();
+    requestAnimationFrame(loop);
+  }
+  loop();
+})();
+</script>
+</body>
+</html>
